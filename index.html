@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prode Mundial 2026</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">⚽</span>
+    <span class="title">Prode Mundial 2026</span>
+  </div>
+  <nav id="nav" class="nav hidden">
+    <button data-view="picks" class="active">Mis picks</button>
+    <button data-view="standings">Tabla</button>
+    <button data-view="others">Otros</button>
+    <button data-view="stats">Stats</button>
+    <button data-view="extras">Campeón / Goleador</button>
+    <button data-view="admin" id="adminTab" class="hidden">Admin</button>
+  </nav>
+  <div class="userbox hidden" id="userbox">
+    <img id="userPhoto" alt="">
+    <span id="userName"></span>
+    <button id="logoutBtn" class="btn-small">Salir</button>
+  </div>
+</header>
+
+<main id="app">
+
+  <!-- LOGIN -->
+  <section id="loginView" class="view">
+    <div class="login-card">
+      <h1>Prode Mundial 2026</h1>
+      <p class="subtitle">Quién chota sabe más del Mundial</p>
+      <p class="rules-summary">
+        <strong>Cómo se puntúa:</strong><br>
+        • Acertás el ganador / empate → <strong>1 pt</strong><br>
+        • Acertás el marcador exacto (pleno) → <strong>3 pts</strong>, o la suma de goles si el partido tiene 4 o más (ej: 4-1 = 5 pts).<br>
+        • Campeón del Mundial → <strong>10 pts</strong> · Goleador → <strong>10 pts</strong><br>
+        • Deadline: hasta el inicio del primer partido del día.
+      </p>
+      <button id="loginBtn" class="btn-google">
+        <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8a12 12 0 1 1 0-24c3 0 5.8 1.1 8 3l5.7-5.7A20 20 0 1 0 24 44a20 20 0 0 0 19.6-16c0-2.4-.3-4.2-.6-7.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.5 16 19 13 24 13c3 0 5.8 1.1 8 3l5.7-5.7A20 20 0 0 0 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5 0 9.7-1.9 13.2-5l-6.1-5.2A12 12 0 0 1 24 36a12 12 0 0 1-11.3-8L6 33A20 20 0 0 0 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3a12 12 0 0 1-4.1 5.8l6.1 5.2C39.4 36 44 30.5 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>
+        Entrar con Google
+      </button>
+
+      <div class="divider"><span>o con email</span></div>
+
+      <div id="emailLoginBox">
+        <input id="nameField" type="text" placeholder="Tu nombre" class="hidden">
+        <input id="emailField" type="email" placeholder="tu@email.com" autocomplete="email">
+        <input id="passwordField" type="password" placeholder="Contraseña (mín. 6 caracteres)" autocomplete="current-password">
+        <button id="emailLoginBtn" class="btn-primary" style="width:100%">Iniciar sesión</button>
+        <p class="toggle-signup"><a href="#" id="toggleSignup">¿No tenés cuenta? Registrate</a></p>
+        <p id="emailError" class="status err"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- MIS PICKS -->
+  <section id="picksView" class="view hidden">
+    <div class="view-head">
+      <h2>Mis pronósticos</h2>
+      <div class="filters">
+        <select id="phaseFilter">
+          <option value="all">Todas las fases</option>
+          <option value="group">Fase de grupos</option>
+          <option value="round_of_32">16vos</option>
+          <option value="round_of_16">Octavos</option>
+          <option value="quarterfinal">Cuartos</option>
+          <option value="semifinal">Semifinal</option>
+          <option value="third_place">3er Puesto</option>
+          <option value="final">Final</option>
+        </select>
+        <label class="checkbox"><input type="checkbox" id="hideLocked"> Ocultar cerrados</label>
+      </div>
+    </div>
+    <div id="matchList" class="match-list"></div>
+  </section>
+
+  <!-- TABLA -->
+  <section id="standingsView" class="view hidden">
+    <h2>Tabla general</h2>
+    <p class="hint">Posiciones del prode. <strong>Desempate: cantidad de plenos.</strong></p>
+    <div id="potInfo"></div>
+    <div class="table-wrap">
+      <table id="standingsTable">
+        <thead>
+          <tr><th>#</th><th>Jugador</th><th>Puntos</th><th>Plenos</th><th>Estado</th><th>Premio</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="legend">
+      <span class="badge champ">Campeón</span>
+      <span class="badge sub">Subcampeón</span>
+      <span class="badge prom">Promoción</span>
+      <span class="badge desc">Descenso</span>
+    </p>
+  </section>
+
+  <!-- OTROS -->
+  <section id="othersView" class="view hidden">
+    <h2>Pronósticos de los demás</h2>
+    <p class="hint" id="othersHint">Solo podés ver los picks de un día una vez que cargaste los tuyos de ese día.</p>
+    <div id="othersList"></div>
+  </section>
+
+  <!-- STATS -->
+  <section id="statsView" class="view hidden">
+    <h2>Stats</h2>
+    <div class="stats-pickers">
+      <div class="stats-picker">
+        <label>Jugador A</label>
+        <select id="statsUserA"></select>
+      </div>
+      <div class="stats-picker">
+        <label>Jugador B <span class="muted">(opcional, para comparar)</span></label>
+        <select id="statsUserB"><option value="">— sin comparar —</option></select>
+      </div>
+    </div>
+    <div id="statsContent"></div>
+  </section>
+
+  <!-- EXTRAS -->
+  <section id="extrasView" class="view hidden">
+    <h2>Campeón y Goleador</h2>
+    <p class="hint" id="extrasDeadline"></p>
+    <div class="extras-card">
+      <div class="form-row">
+        <label>Campeón del Mundial (10 pts)</label>
+        <select id="champSelect"></select>
+      </div>
+      <div class="form-row">
+        <label>Goleador del Mundial (10 pts)</label>
+        <input id="scorerInput" type="text" placeholder="Nombre del jugador (ej: Lionel Messi)">
+      </div>
+      <button id="saveExtras" class="btn-primary">Guardar</button>
+      <p id="extrasStatus" class="status"></p>
+    </div>
+  </section>
+
+  <!-- ADMIN -->
+  <section id="adminView" class="view hidden">
+    <h2>Panel admin</h2>
+    <p class="hint">Solo Gian ve esto. Cargá resultados oficiales acá si la API falla, o decidí campeón/goleador al final del torneo.</p>
+    <div class="admin-tabs">
+      <button data-admintab="results" class="active">Resultados</button>
+      <button data-admintab="finals">Campeón / Goleador oficiales</button>
+      <button data-admintab="members">Miembros del grupo</button>
+    </div>
+    <div id="adminResults" class="admin-pane">
+      <div class="sync-bar">
+        <button id="syncBtn" class="btn-primary">🔄 Sincronizar desde API</button>
+        <span id="syncStatus" class="sync-status">Sin sincronizar aún</span>
+      </div>
+      <p class="hint" style="font-size:12px">Mientras tengas la web abierta (aunque sea minimizada), sincroniza sola cada 20 min. Incluye resultados <strong>en vivo</strong> durante el partido (1H, HT, 2H, etc.). Hacé click en el botón para forzar. Plan gratis: 100 requests/día.</p>
+      <div id="adminMatchList"></div>
+    </div>
+    <div id="adminFinals" class="admin-pane hidden">
+      <div class="form-row">
+        <label>Campeón oficial</label>
+        <select id="adminChamp"></select>
+      </div>
+      <div class="form-row">
+        <label>Goleador oficial</label>
+        <input id="adminScorer" type="text" placeholder="Nombre exacto">
+      </div>
+      <button id="adminSaveFinals" class="btn-primary">Guardar oficiales</button>
+      <p id="adminFinalsStatus" class="status"></p>
+    </div>
+    <div id="adminMembers" class="admin-pane hidden">
+      <p>Para que un amigo aparezca en la tabla, tiene que ingresar al menos una vez con su cuenta Google.</p>
+      <table id="membersTable">
+        <thead><tr><th>Email</th><th>Nombre</th><th>Apodo</th><th>Acción</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<!-- Modal de avatar agrandado -->
+<div id="avatarModal" class="avatar-modal hidden">
+  <div class="avatar-modal-content">
+    <img id="avatarBig" alt="">
+    <p id="avatarCaption"></p>
+  </div>
+</div>
+
+<!-- Firebase config (vos lo completás) y app -->
+<script type="module" src="config.js"></script>
+<script type="module" src="app.js"></script>
+
+</body>
+</html>

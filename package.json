@@ -1,0 +1,12 @@
+{
+  "name": "prode-mundial-2026",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "sync": "node sync.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}

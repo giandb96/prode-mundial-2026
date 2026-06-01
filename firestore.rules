@@ -1,0 +1,4 @@
+// ⚠️ ESTE ARCHIVO YA NO SE USA.
+// Migramos de Firestore a Realtime Database porque Firestore ahora requiere tarjeta.
+// Las reglas válidas están en `database.rules.json`.
+// Podés borrar este archivo tranquilo.

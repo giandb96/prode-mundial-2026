@@ -1,0 +1,34 @@
+name: Sync prode (api-football → Firebase)
+
+on:
+  schedule:
+    # Cada 20 minutos. GitHub Actions a veces tarda hasta 5-10 min en gatillar.
+    - cron: "*/20 * * * *"
+  workflow_dispatch:   # permite gatillar a mano desde la UI de GitHub
+
+# Cancelar runs anteriores si se solapan
+concurrency:
+  group: prode-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run sync
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node sync.mjs
