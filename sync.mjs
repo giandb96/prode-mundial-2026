@@ -1,9 +1,10 @@
 // Script de sincronización standalone para GitHub Actions.
-// Corre cada 20 min, llama a api-football y actualiza tournament/results
+// Corre cada 20 min, llama a TheSportsDB y actualiza tournament/results
 // y tournament/teamOverrides en Realtime Database.
 //
+// TheSportsDB es gratis sin clave (usa la key publica "3").
+//
 // Variables de entorno requeridas:
-//   API_FOOTBALL_KEY
 //   FIREBASE_DATABASE_URL
 //   FIREBASE_SERVICE_ACCOUNT  (el JSON completo del service account)
 
@@ -11,21 +12,28 @@ import { initializeApp, cert } from "firebase-admin/app";
 import { getDatabase } from "firebase-admin/database";
 import { MATCHES } from "./fixture.js";
 
-const LEAGUE = 1;        // FIFA World Cup
-const SEASON = 2026;
+const TSDB_KEY = "3";          // free key pública
+const LEAGUE_ID = 4429;        // FIFA World Cup
+const SEASON = "2026";
 
 const TEAM_ALIASES = {
   "korea republic": "South Korea",
+  "south korea": "South Korea",
   "ir iran": "Iran",
+  "iran": "Iran",
   "czechia": "Czech Republic",
+  "czech republic": "Czech Republic",
   "côte d'ivoire": "Ivory Coast",
   "cote d'ivoire": "Ivory Coast",
+  "ivory coast": "Ivory Coast",
   "usa": "United States",
   "united states of america": "United States",
+  "united states": "United States",
   "congo dr": "DR Congo",
   "dr congo": "DR Congo",
   "democratic republic of the congo": "DR Congo",
   "cape verde islands": "Cape Verde",
+  "cape verde": "Cape Verde",
 };
 
 function normalizeTeam(s) {
@@ -35,25 +43,37 @@ function normalizeTeam(s) {
 function aliasTeam(name) {
   return TEAM_ALIASES[normalizeTeam(name)] || name;
 }
-const isPlaceholder = (s) => /grupo|group|winner|runner|mejor|best/i.test(s || "");
+const isPlaceholder = (s) => /grupo|group|winner|runner|mejor|best|tbd|tba/i.test(s || "");
 
-function phaseFromRound(round) {
-  if (!round) return null;
-  const r = round.toLowerCase();
-  if (r.includes("round of 32") || r.includes("16vos")) return "round_of_32";
-  if (r.includes("round of 16") || r.includes("octavos")) return "round_of_16";
-  if (r.includes("quarter") || r.includes("cuartos")) return "quarterfinal";
+// TheSportsDB usa strings de "intRound" o "strGroup". Mapeo a nuestras fases.
+function phaseFromRound(round, group) {
+  const r = (round || "").toString().toLowerCase();
+  const g = (group || "").toString().toLowerCase();
+  // En group stage, strGroup tiene "A".."L" y intRound puede ser 1, 2, 3
+  if (g && /^[a-l]$/i.test(g)) return "group";
+  // Para knockout, strRound puede tener texto descriptivo
+  if (r.includes("32") || r.includes("round of 32")) return "round_of_32";
+  if (r.includes("16") || r.includes("round of 16") || r.includes("octav")) return "round_of_16";
+  if (r.includes("quarter") || r.includes("cuart")) return "quarterfinal";
   if (r.includes("semi")) return "semifinal";
   if (r.includes("3rd") || r.includes("third") || r.includes("tercer")) return "third_place";
   if (r.includes("final")) return "final";
+  // Fallback por número de round (TheSportsDB usa 125+ para knockout en algunos torneos)
+  const n = parseInt(r, 10);
+  if (n >= 125 && n < 200) return "round_of_32";
+  if (n >= 200 && n < 250) return "round_of_16";
+  if (n >= 250 && n < 300) return "quarterfinal";
+  if (n >= 300 && n < 400) return "semifinal";
+  if (n >= 400 && n < 500) return "third_place";
+  if (n >= 500) return "final";
   return null;
 }
 
-const VALID_STATUSES = [
-  "FT", "AET", "PEN",
-  "1H", "HT", "2H", "ET", "BT", "P",
-  "LIVE", "INT", "SUSP"
-];
+// Determina si un evento tiene resultado (terminado o en curso con scores)
+function hasResult(evt) {
+  return evt.intHomeScore != null && evt.intAwayScore != null
+    && evt.intHomeScore !== "" && evt.intAwayScore !== "";
+}
 
 async function main() {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -64,43 +84,34 @@ async function main() {
   const db = getDatabase(app);
 
   // 1. Leer estado actual
-  const currentResultsSnap = await db.ref("tournament/results").get();
-  const currentResults = currentResultsSnap.val() || {};
-  const currentOverridesSnap = await db.ref("tournament/teamOverrides").get();
-  const currentOverrides = currentOverridesSnap.val() || {};
+  const currentResults = (await db.ref("tournament/results").get()).val() || {};
+  const currentOverrides = (await db.ref("tournament/teamOverrides").get()).val() || {};
 
-  // 2. Llamar a api-football
-  const resp = await fetch(
-    `https://v3.football.api-sports.io/fixtures?league=${LEAGUE}&season=${SEASON}`,
-    { headers: { "x-apisports-key": process.env.API_FOOTBALL_KEY } }
-  );
+  // 2. Llamar a TheSportsDB
+  const url = `https://www.thesportsdb.com/api/v1/json/${TSDB_KEY}/eventsseason.php?id=${LEAGUE_ID}&s=${SEASON}`;
+  const resp = await fetch(url);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const data = await resp.json();
-  const errs = data.errors;
-  if (errs && (Array.isArray(errs) ? errs.length : Object.keys(errs).length)) {
-    throw new Error("API errors: " + JSON.stringify(errs));
-  }
-  const fixtures = data.response || [];
-  console.log(`API trajo ${fixtures.length} fixtures`);
+  const events = data.events || [];
+  console.log(`TheSportsDB trajo ${events.length} eventos`);
 
-  // 3. Buckets de knockout por phase+date para mapeo posicional
-  const apiKnockout = fixtures
-    .filter(f => f.league?.round && !/group|grupo/i.test(f.league.round))
-    .sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date));
+  // 3. Buckets de knockout
+  const knockoutEvents = events
+    .filter(e => phaseFromRound(e.intRound, e.strGroup) && phaseFromRound(e.intRound, e.strGroup) !== "group")
+    .sort((a, b) => new Date(`${a.dateEvent}T${a.strTime || "00:00:00"}`) - new Date(`${b.dateEvent}T${b.strTime || "00:00:00"}`));
   const knockoutByPhaseDate = {};
-  for (const f of apiKnockout) {
-    const phase = phaseFromRound(f.league?.round);
-    if (!phase) continue;
-    const date = (f.fixture.date || "").split("T")[0];
+  for (const e of knockoutEvents) {
+    const phase = phaseFromRound(e.intRound, e.strGroup);
+    const date = e.dateEvent;
     const key = `${phase}|${date}`;
     if (!knockoutByPhaseDate[key]) knockoutByPhaseDate[key] = [];
-    knockoutByPhaseDate[key].push(f);
+    knockoutByPhaseDate[key].push(e);
   }
 
   const resultUpdates = {};
   const overrideUpdates = {};
 
-  // 4. Mapeo de equipos reales para knockout
+  // 4. Mapeo de equipos reales para knockout (cuando ya están definidos los cruces)
   for (const key of Object.keys(knockoutByPhaseDate)) {
     const [phase, date] = key.split("|");
     const ours = MATCHES.filter(m => m.phase === phase && m.date === date)
@@ -109,9 +120,8 @@ async function main() {
     const n = Math.min(ours.length, theirs.length);
     for (let i = 0; i < n; i++) {
       const myMatch = ours[i];
-      const apiF = theirs[i];
-      const apiHome = apiF.teams?.home?.name;
-      const apiAway = apiF.teams?.away?.name;
+      const apiHome = theirs[i].strHomeTeam;
+      const apiAway = theirs[i].strAwayTeam;
       if (apiHome && apiAway && !isPlaceholder(apiHome) && !isPlaceholder(apiAway)) {
         const cur = currentOverrides[myMatch.id] || {};
         if (cur.home !== apiHome || cur.away !== apiAway) {
@@ -121,30 +131,31 @@ async function main() {
     }
   }
 
-  // 5. Resultados (grupos + knockout)
+  // 5. Resultados de TODOS los partidos con score
   let unmatched = 0;
-  for (const f of fixtures) {
-    const st = f.fixture?.status?.short;
-    if (!VALID_STATUSES.includes(st)) continue;
-    if (f.goals?.home == null || f.goals?.away == null) continue;
-    const apiDate = (f.fixture.date || "").split("T")[0];
-    const apiHome = aliasTeam(f.teams.home.name);
-    const apiAway = aliasTeam(f.teams.away.name);
+  for (const e of events) {
+    if (!hasResult(e)) continue;
+    const apiDate = e.dateEvent;
+    const apiHome = aliasTeam(e.strHomeTeam);
+    const apiAway = aliasTeam(e.strAwayTeam);
+    const homeScore = parseInt(e.intHomeScore, 10);
+    const awayScore = parseInt(e.intAwayScore, 10);
 
     let candidate = MATCHES.find(m =>
       m.date === apiDate &&
       normalizeTeam(m.homeRaw) === normalizeTeam(apiHome) &&
       normalizeTeam(m.awayRaw) === normalizeTeam(apiAway)
     );
-    // Knockout: matchear por posición
-    if (!candidate && f.league?.round && !/group|grupo/i.test(f.league.round)) {
-      const phase = phaseFromRound(f.league.round);
-      const date = (f.fixture.date || "").split("T")[0];
-      const ours = MATCHES.filter(m => m.phase === phase && m.date === date)
-                          .sort((a, b) => a.id.localeCompare(b.id));
-      const theirs = knockoutByPhaseDate[`${phase}|${date}`] || [];
-      const idx = theirs.indexOf(f);
-      if (idx >= 0 && ours[idx]) candidate = ours[idx];
+    if (!candidate) {
+      // Knockout: matchear por posición
+      const phase = phaseFromRound(e.intRound, e.strGroup);
+      if (phase && phase !== "group") {
+        const ours = MATCHES.filter(m => m.phase === phase && m.date === apiDate)
+                            .sort((a, b) => a.id.localeCompare(b.id));
+        const theirs = knockoutByPhaseDate[`${phase}|${apiDate}`] || [];
+        const idx = theirs.indexOf(e);
+        if (idx >= 0 && ours[idx]) candidate = ours[idx];
+      }
     }
     if (!candidate) {
       const alts = MATCHES.filter(m =>
@@ -156,8 +167,8 @@ async function main() {
     if (!candidate) { unmatched++; continue; }
 
     const existing = currentResults[candidate.id];
-    if (existing && existing.home === f.goals.home && existing.away === f.goals.away) continue;
-    resultUpdates[candidate.id] = { home: f.goals.home, away: f.goals.away };
+    if (existing && existing.home === homeScore && existing.away === awayScore) continue;
+    resultUpdates[candidate.id] = { home: homeScore, away: awayScore };
   }
 
   // 6. Aplicar updates

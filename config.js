@@ -17,8 +17,3 @@ export const ADMIN_EMAILS = [
 
 export const TOURNAMENT_NAME = "Mundial 2026";
 export const TOURNAMENT_START_UTC = "2026-06-11T19:00:00Z";
-
-// api-football.com (api-sports.io). League 1 = FIFA World Cup, season 2026.
-export const API_FOOTBALL_KEY = "01751c1c293c30dbd56fb8268665c3ef";
-export const API_FOOTBALL_LEAGUE = 1;
-export const API_FOOTBALL_SEASON = 2026;
