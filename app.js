@@ -366,7 +366,7 @@ function renderMatchCard(m, dayLocked) {
 
   const meta = el("div", "match-meta");
   const left = el("span"); left.textContent = `${m.phaseLabel}${m.group ? ` · Grupo ${m.group}` : ""}`;
-  const right = el("span"); right.textContent = m.venue || "";
+  const right = el("span"); right.textContent = matchMetaLabel(m);
   meta.appendChild(left); meta.appendChild(right);
 
   const homeTeam = el("div", "team home"); homeTeam.textContent = matchHome(m);
@@ -595,7 +595,8 @@ function renderOthers() {
     for (const m of dayMatches) {
       const card = el("div", "other-match");
       const title = el("div", "om-title");
-      title.textContent = `${matchHome(m)} vs ${matchAway(m)}` + (state.results[m.id] ? ` (${state.results[m.id].home}-${state.results[m.id].away})` : "");
+      const tAR = matchTimeAR(m);
+      title.textContent = (tAR ? `${tAR} hs \u00B7 ` : "") + `${matchHome(m)} vs ${matchAway(m)}` + (state.results[m.id] ? ` (${state.results[m.id].home}-${state.results[m.id].away})` : "");
       card.appendChild(title);
       const tbl = el("table");
       for (const u of state.allUsers) {
@@ -1051,17 +1052,38 @@ function escapeHtml(s) {
   return (s || "").toString().replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+const TZ_AR = "America/Argentina/Buenos_Aires";
 function formatDate(s) {
   const d = new Date(s + "T12:00:00Z");
-  return d.toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+  return d.toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" });
 }
 function formatTime(ms) {
-  return new Date(ms).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+  return new Date(ms).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TZ_AR });
 }
 function formatDateTime(iso) {
   return new Date(iso).toLocaleString("es-AR", {
-    weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
+    weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TZ_AR
   });
+}
+// Hora del partido en hora argentina. Si por el huso cae en otro dia que el
+// "dia FIFA" del fixture, se aclara el dia (ej: "dom 01:00").
+function matchTimeAR(m) {
+  if (!m.datetime) return "";
+  const d = new Date(m.datetime);
+  const time = d.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TZ_AR });
+  const dateAR = d.toLocaleDateString("sv-SE", { timeZone: TZ_AR }); // YYYY-MM-DD
+  if (dateAR !== m.date) {
+    const wd = d.toLocaleDateString("es-AR", { weekday: "short", timeZone: TZ_AR });
+    return `${wd} ${time}`;
+  }
+  return time;
+}
+function matchMetaLabel(m) {
+  const parts = [];
+  const t = matchTimeAR(m);
+  if (t) parts.push(`\u{1F550} ${t} hs`);
+  if (m.venue) parts.push(m.venue);
+  return parts.join(" \u00B7 ");
 }
 function toast(msg, kind) {
   const t = $("toast");
