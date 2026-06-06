@@ -60,6 +60,15 @@
     </div>
   </section>
 
+  <!-- PENDIENTE DE APROBACION -->
+  <section id="pendingView" class="view hidden">
+    <div class="login-card">
+      <h1>⏳ Esperando aprobación</h1>
+      <p class="subtitle" id="pendingMsg">Tu solicitud le llegó a Gian. Cuando te acepte, esta pantalla se desbloquea sola.</p>
+      <button id="pendingLogout" class="btn-small">Salir</button>
+    </div>
+  </section>
+
   <!-- MIS PICKS -->
   <section id="picksView" class="view hidden">
     <div class="view-head">
@@ -173,9 +182,10 @@
       <p id="adminFinalsStatus" class="status"></p>
     </div>
     <div id="adminMembers" class="admin-pane hidden">
-      <p>Para que un amigo aparezca en la tabla, tiene que ingresar al menos una vez con su cuenta Google.</p>
+      <div id="pendingRequests"></div>
+      <p>Para que un amigo aparezca en la tabla, tiene que ingresar al menos una vez y vos tenés que aceptarlo.</p>
       <table id="membersTable">
-        <thead><tr><th>Email</th><th>Nombre</th><th>Apodo</th><th>Acción</th></tr></thead>
+        <thead><tr><th>Email</th><th>Nombre</th><th>Apodo</th><th>Estado</th><th>Acción</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

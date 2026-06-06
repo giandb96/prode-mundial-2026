@@ -31,7 +31,9 @@ const state = {
   allPicks: {},          // { uid: { matchId: { home, away } } }
   allExtras: {},         // { uid: { champion, topScorer } }
   view: "picks",
-  unsubs: []
+  unsubs: [],
+  entered: false,        // ya entro a la app (usuario aprobado)
+  approvalUnsub: null    // listener del flag de aprobacion
 };
 
 // Helper: nombre real del equipo (override si existe, sino del fixture)
@@ -171,10 +173,13 @@ $("emailLoginBtn").addEventListener("click", async () => {
 });
 
 $("logoutBtn").addEventListener("click", () => signOut(auth));
+$("pendingLogout").addEventListener("click", () => signOut(auth));
 
 onAuthStateChanged(auth, async (user) => {
   if (!user) {
     state.user = null;
+    state.entered = false;
+    if (state.approvalUnsub) { try { state.approvalUnsub(); } catch (e) {} state.approvalUnsub = null; }
     cleanupSubscriptions();
     showView("login");
     $("nav").classList.add("hidden");
@@ -210,16 +215,51 @@ onAuthStateChanged(auth, async (user) => {
   photo.classList.add("avatar", "clickable");
   $("userName").textContent = user.displayName || user.email;
   $("userbox").classList.remove("hidden");
+
+  // ===== APROBACION DE MIEMBROS =====
+  state.entered = false;
+  if (state.user.isAdmin) {
+    // El admin se auto-aprueba y entra directo
+    await update(ref(db, `users/${user.uid}`), { approved: true });
+    state.entered = true;
+    enterApp();
+    return;
+  }
+  // El resto necesita aprobacion de Gian. Escuchamos el flag en vivo:
+  // apenas lo apruebe, la pantalla se desbloquea sola sin recargar.
+  const apprRef = ref(db, `users/${user.uid}/approved`);
+  const apprHandler = onValue(apprRef, (snap) => {
+    const v = snap.val();
+    if (v === true) {
+      if (!state.entered) { state.entered = true; enterApp(); }
+    } else {
+      state.entered = false;
+      cleanupSubscriptions();
+      showPendingScreen(v === false);
+    }
+  });
+  state.approvalUnsub = () => off(apprRef, "value", apprHandler);
+});
+
+async function enterApp() {
   $("nav").classList.remove("hidden");
   if (state.user.isAdmin) $("adminTab").classList.remove("hidden");
   else $("adminTab").classList.add("hidden");
-
   await loadInitialData();
   startSubscriptions();
   showView("picks");
   // Auto-sync de resultados al entrar (solo admin)
   maybeAutoSync();
-});
+}
+
+function showPendingScreen(rejected) {
+  $("nav").classList.add("hidden");
+  document.querySelectorAll(".view").forEach(v => v.classList.add("hidden"));
+  $("pendingView").classList.remove("hidden");
+  $("pendingMsg").textContent = rejected
+    ? "Tu solicitud fue rechazada. Si te parece que es un error, habla con Gian."
+    : "Tu solicitud le llego a Gian. Cuando te acepte, esta pantalla se desbloquea sola (podes dejarla abierta o volver mas tarde).";
+}
 
 // ===================== DATA LOAD =====================
 async function loadInitialData() {
@@ -250,6 +290,7 @@ function startSubscriptions() {
   const h2 = onValue(r2, (snap) => {
     const v = snap.val() || {};
     state.allUsers = Object.entries(v).map(([uid, data]) => ({ uid, ...data }));
+    updateAdminPendingBadge();
     renderCurrentView();
   });
   // Todos los picks
@@ -487,7 +528,7 @@ function formatARS(n) {
 function renderStandings() {
   const tbody = document.querySelector("#standingsTable tbody");
   tbody.innerHTML = "";
-  const rows = state.allUsers.map(u => {
+  const rows = approvedUsers().map(u => {
     const { pts, plenos } = totalPointsForUser(u.uid);
     return { ...u, pts, plenos };
   });
@@ -599,7 +640,7 @@ function renderOthers() {
       title.textContent = (tAR ? `${tAR} hs \u00B7 ` : "") + `${matchHome(m)} vs ${matchAway(m)}` + (state.results[m.id] ? ` (${state.results[m.id].home}-${state.results[m.id].away})` : "");
       card.appendChild(title);
       const tbl = el("table");
-      for (const u of state.allUsers) {
+      for (const u of approvedUsers()) {
         const p = (state.allPicks[u.uid] || {})[m.id];
         const tr = el("tr");
         const displayName = u.nickname || u.name || u.email;
@@ -684,7 +725,7 @@ function computeStats(uid) {
 function renderStats() {
   // Llenar selectores
   const selA = $("statsUserA"), selB = $("statsUserB");
-  const userOptions = state.allUsers
+  const userOptions = approvedUsers()
     .map(u => ({ uid: u.uid, label: u.nickname || u.name || u.email }))
     .sort((a, b) => a.label.localeCompare(b.label));
   const currentA = selA.value || state.user.uid;
@@ -945,22 +986,99 @@ function renderAdminFinals() {
   };
 }
 
+// ===================== APROBACION (admin) =====================
+function pendingUsers() {
+  return state.allUsers.filter(u => u.approved !== true && u.approved !== false);
+}
+
+// Solo los miembros aceptados cuentan para el pozo, la tabla, "otros" y stats
+function approvedUsers() {
+  return state.allUsers.filter(u => u.approved === true);
+}
+
+let lastPendingCount = null;
+function updateAdminPendingBadge() {
+  if (!state.user || !state.user.isAdmin) return;
+  const n = pendingUsers().length;
+  $("adminTab").textContent = n > 0 ? `Admin (\u{1F514} ${n})` : "Admin";
+  if (lastPendingCount != null && n > lastPendingCount) {
+    toast(`\u{1F514} Nueva solicitud de acceso (${n} pendiente${n > 1 ? "s" : ""})`, "ok");
+  }
+  lastPendingCount = n;
+}
+
+function setApproval(uid, value) {
+  return update(ref(db, `users/${uid}`), { approved: value });
+}
+
 function renderAdminMembers() {
+  // --- Solicitudes pendientes ---
+  const reqBox = $("pendingRequests");
+  reqBox.innerHTML = "";
+  const pend = pendingUsers();
+  if (pend.length > 0) {
+    const card = el("div", "requests-card");
+    const title = el("h3");
+    title.textContent = `\u{1F514} Solicitudes de acceso (${pend.length})`;
+    card.appendChild(title);
+    for (const u of pend) {
+      const row = el("div", "request-row");
+      const who = el("div", "user-cell");
+      who.innerHTML = `${avatarHtml(u.email, u.photoURL, u.name || u.email, 32, true)}<span>${escapeHtml(u.name || "")} \u00B7 ${escapeHtml(u.email || "")}</span>`;
+      const actions = el("div", "request-actions");
+      const ok = el("button", "btn-primary btn-small"); ok.textContent = "\u2713 Aceptar";
+      const no = el("button", "btn-small"); no.textContent = "\u2715 Rechazar";
+      ok.onclick = async () => {
+        try { await setApproval(u.uid, true); toast(`${u.name || u.email} aceptado`, "ok"); }
+        catch (e) { toast(e.message, "err"); }
+      };
+      no.onclick = async () => {
+        try { await setApproval(u.uid, false); toast(`${u.name || u.email} rechazado`, "ok"); }
+        catch (e) { toast(e.message, "err"); }
+      };
+      actions.appendChild(ok); actions.appendChild(no);
+      row.appendChild(who); row.appendChild(actions);
+      card.appendChild(row);
+    }
+    if (pend.length > 1) {
+      const all = el("button", "btn-primary btn-small");
+      all.textContent = `\u2713 Aceptar todos (${pend.length})`;
+      all.style.marginTop = "10px";
+      all.onclick = async () => {
+        try {
+          for (const u of pend) await setApproval(u.uid, true);
+          toast("Todos aceptados", "ok");
+        } catch (e) { toast(e.message, "err"); }
+      };
+      card.appendChild(all);
+    }
+    reqBox.appendChild(card);
+  }
+
+  // --- Tabla de miembros ---
   const tbody = document.querySelector("#membersTable tbody");
   tbody.innerHTML = "";
   for (const u of state.allUsers) {
     const tr = el("tr");
     const avatarSmall = avatarHtml(u.email, u.photoURL, u.name || u.email, 32, true);
-    tr.innerHTML = `<td><div class="user-cell">${avatarSmall}<span>${escapeHtml(u.email)}</span></div></td><td>${escapeHtml(u.name || "")}</td><td><input value="${escapeHtml(u.nickname || "")}" data-uid="${u.uid}" class="nick-input score-input" style="width:auto"></td><td><button class="btn-small" data-uid="${u.uid}">Guardar</button></td>`;
+    const estado = u.approved === true ? "\u2705 Aceptado" : (u.approved === false ? "\u26D4 Rechazado" : "\u23F3 Pendiente");
+    const toggleLabel = u.approved === true ? "Bloquear" : "Aceptar";
+    tr.innerHTML = `<td><div class="user-cell">${avatarSmall}<span>${escapeHtml(u.email)}</span></div></td><td>${escapeHtml(u.name || "")}</td><td><input value="${escapeHtml(u.nickname || "")}" data-uid="${u.uid}" class="nick-input score-input" style="width:auto"></td><td>${estado}</td><td><button class="btn-small" data-uid="${u.uid}" data-action="nick">Guardar</button> <button class="btn-small" data-uid="${u.uid}" data-action="toggle">${toggleLabel}</button></td>`;
     tbody.appendChild(tr);
   }
   tbody.querySelectorAll("button").forEach(b => {
     b.onclick = async () => {
       const uid = b.dataset.uid;
-      const input = tbody.querySelector(`input[data-uid="${uid}"]`);
       try {
-        await update(ref(db, `users/${uid}`), { nickname: input.value.trim() });
-        toast("Guardado", "ok");
+        if (b.dataset.action === "toggle") {
+          const u = state.allUsers.find(x => x.uid === uid);
+          await setApproval(uid, u && u.approved === true ? false : true);
+          toast("Guardado", "ok");
+        } else {
+          const input = tbody.querySelector(`input[data-uid="${uid}"]`);
+          await update(ref(db, `users/${uid}`), { nickname: input.value.trim() });
+          toast("Guardado", "ok");
+        }
       } catch (e) { toast(e.message, "err"); }
     };
   });

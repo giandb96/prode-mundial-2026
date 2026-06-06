@@ -3,31 +3,36 @@
     "users": {
       ".read": "auth != null",
       "$uid": {
-        ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')"
+        "email":     { ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')" },
+        "name":      { ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')" },
+        "photoURL":  { ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')" },
+        "lastLogin": { ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')" },
+        "nickname":  { ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'" },
+        "approved":  { ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'" }
       }
     },
     "picks": {
-      ".read": "auth != null",
+      ".read": "auth != null && (auth.token.email === 'gian96db@gmail.com' || root.child('users').child(auth.uid).child('approved').val() === true)",
       "$uid": {
         ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'",
         "champion": {
-          ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')"
+          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true))"
         },
         "topScorer": {
-          ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')"
+          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true))"
         },
         "lastUpdate": {
-          ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com')"
+          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true))"
         },
         "matches": {
           "$matchId": {
-            ".write": "auth != null && (auth.uid === $uid || auth.token.email === 'gian96db@gmail.com') && !root.child('tournament').child('results').child($matchId).exists()"
+            ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true)) && !root.child('tournament').child('results').child($matchId).exists()"
           }
         }
       }
     },
     "tournament": {
-      ".read": "auth != null",
+      ".read": "auth != null && (auth.token.email === 'gian96db@gmail.com' || root.child('users').child(auth.uid).child('approved').val() === true)",
       ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'"
     }
   }
