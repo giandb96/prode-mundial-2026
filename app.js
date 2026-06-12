@@ -52,8 +52,9 @@ function scoreMatch(officialHome, officialAway, predHome, predAway) {
   // - Resultado correcto (gana local / empate / gana visitante): 1
   // - Si no, 0
   if (officialHome == null || officialAway == null) return { pts: 0, kind: "pending" };
-  if (predHome == null || predAway == null) return { pts: 0, kind: "miss" };
-  const oH = +officialHome, oA = +officialAway, pH = +predHome, pA = +predAway;
+  // Pick a medias (un solo lado cargado): el lado vacío cuenta como 0
+  if (predHome == null && predAway == null) return { pts: 0, kind: "miss" };
+  const oH = +officialHome, oA = +officialAway, pH = +(predHome ?? 0), pA = +(predAway ?? 0);
   if (oH === pH && oA === pA) {
     const total = oH + oA;
     return { pts: total > 3 ? total : 3, kind: "pleno" };
@@ -241,10 +242,63 @@ onAuthStateChanged(auth, async (user) => {
   state.approvalUnsub = () => off(apprRef, "value", apprHandler);
 });
 
+// Siembra en la DB los deadlines (hora de cierre) de cada partido y de los
+// extras. La regla de seguridad de Firebase usa este nodo para rechazar picks
+// enviados despues del cierre, aunque todavia no se haya cargado el resultado.
+// Se ejecuta solo cuando entra el admin; corre rapido y solo escribe lo que cambio.
+async function ensureDeadlines() {
+  if (!state.user?.isAdmin) return;
+  try {
+    const snap = await get(ref(db, "deadlines"));
+    const existing = snap.val() || {};
+    const updates = {};
+    for (const m of MATCHES) {
+      const dl = dayDeadline(m.date);
+      if (existing[m.id] !== dl) updates[m.id] = dl;
+    }
+    const extrasDl = new Date(TOURNAMENT_START_UTC).getTime();
+    if (existing._extras !== extrasDl) updates._extras = extrasDl;
+    if (Object.keys(updates).length) await update(ref(db, "deadlines"), updates);
+  } catch (e) {
+    console.warn("No se pudieron sembrar los deadlines:", e);
+  }
+}
+
+// Copia MIS picks/extras a los nodos espejo (picksByMatch / extras) para los que
+// se hayan cargado antes de existir el espejo. Cada uno espeja lo suyo, porque ni
+// el admin puede leer los picks ajenos. Solo escribe lo que todavia esta abierto
+// (antes del cierre); idempotente. Corre al entrar cualquier usuario.
+async function mirrorMyPicks() {
+  if (!state.user) return;
+  try {
+    const snap = await get(ref(db, `picks/${state.user.uid}`));
+    const data = snap.val() || {};
+    const matches = data.matches || {};
+    const updates = {};
+    for (const [mid, p] of Object.entries(matches)) {
+      if (!p || (p.home == null && p.away == null)) continue;
+      const m = MATCHES.find(x => x.id === mid);
+      if (!m || Date.now() >= dayDeadline(m.date)) continue; // ya cerrado: no se puede escribir
+      updates[`picksByMatch/${mid}/${state.user.uid}`] = { home: p.home ?? null, away: p.away ?? null };
+    }
+    if ((data.champion || data.topScorer) && Date.now() < new Date(TOURNAMENT_START_UTC).getTime()) {
+      updates[`extras/${state.user.uid}`] = { champion: data.champion || null, topScorer: data.topScorer || null };
+    }
+    if (Object.keys(updates).length) await update(ref(db), updates);
+  } catch (e) {
+    console.warn("No se pudieron espejar mis picks:", e);
+  }
+}
+
 async function enterApp() {
   $("nav").classList.remove("hidden");
-  if (state.user.isAdmin) $("adminTab").classList.remove("hidden");
-  else $("adminTab").classList.add("hidden");
+  if (state.user.isAdmin) {
+    $("adminTab").classList.remove("hidden");
+    await ensureDeadlines();
+  } else {
+    $("adminTab").classList.add("hidden");
+  }
+  await mirrorMyPicks();
   await loadInitialData();
   startSubscriptions();
   showView("picks");
@@ -279,6 +333,7 @@ function startSubscriptions() {
     const v = snap.val() || {};
     state.results = v.results || {};
     state.teamOverrides = v.teamOverrides || {};
+    state.lastApiSync = v.lastApiSync || 0;
     state.finals = {
       champion: v.champion || null,
       topScorer: v.topScorer || null
@@ -291,35 +346,89 @@ function startSubscriptions() {
     const v = snap.val() || {};
     state.allUsers = Object.entries(v).map(([uid, data]) => ({ uid, ...data }));
     updateAdminPendingBadge();
-    renderCurrentView();
-  });
-  // Todos los picks
-  const r3 = ref(db, "picks");
-  const h3 = onValue(r3, (snap) => {
-    const v = snap.val() || {};
-    state.allPicks = {};
-    state.allExtras = {};
-    for (const [uid, data] of Object.entries(v)) {
-      state.allPicks[uid] = data.matches || {};
-      state.allExtras[uid] = {
-        champion: data.champion || null,
-        topScorer: data.topScorer || null
-      };
-    }
-    if (state.allPicks[state.user.uid]) state.myPicks = state.allPicks[state.user.uid];
-    if (state.allExtras[state.user.uid]) state.myExtras = state.allExtras[state.user.uid];
-    renderCurrentView();
+    // La vista de picks NO depende de la lista de usuarios. Evitamos re-renderizarla
+    // cada vez que alguien entra (cada login escribe lastLogin en users): eso era lo
+    // que disparaba re-renders constantes mientras la gente cargaba sus pronósticos.
+    if (state.view !== "picks") renderCurrentView();
   });
   state.unsubs = [
     () => off(r1, "value", h1),
-    () => off(r2, "value", h2),
-    () => off(r3, "value", h3)
+    () => off(r2, "value", h2)
   ];
+
+  // Mis propios picks (siempre legibles por mi, esten cerrados o no)
+  const rMine = ref(db, `picks/${state.user.uid}`);
+  const hMine = onValue(rMine, (snap) => {
+    const data = snap.val() || {};
+    state.myPicks = data.matches || {};
+    state.myExtras = { champion: data.champion || null, topScorer: data.topScorer || null };
+    state.allPicks[state.user.uid] = state.myPicks;
+    state.allExtras[state.user.uid] = state.myExtras;
+    renderCurrentView();
+  });
+  state.unsubs.push(() => off(rMine, "value", hMine));
+
+  // Nadie (ni el admin) puede ver los picks ajenos antes del cierre. Todos leen
+  // solo lo que las reglas permiten: picks de partidos ya cerrados + extras una vez
+  // iniciado el torneo. El admin es un jugador mas para esto.
+  state.subbedMatches = new Set();
+  state._extrasSub = false;
+  subscribeRevealed();
+  state.revealTimer = setInterval(subscribeRevealed, 30000);
+  state.unsubs.push(() => { if (state.revealTimer) { clearInterval(state.revealTimer); state.revealTimer = null; } });
+}
+
+// Para usuarios normales: engancha listeners a los picks ajenos a medida que cada
+// partido cierra (y a los extras cuando arranca el torneo). Idempotente; se llama
+// al entrar y cada 30s para tomar lo que se va cerrando sin recargar.
+function subscribeRevealed() {
+  if (!state.user || !state.subbedMatches) return;
+  const now = Date.now();
+
+  // Extras ajenos (campeon/goleador): legibles desde el inicio del torneo.
+  const extrasStart = new Date(TOURNAMENT_START_UTC).getTime();
+  if (!state._extrasSub && now >= extrasStart) {
+    state._extrasSub = true;
+    const er = ref(db, "extras");
+    const eh = onValue(er, (snap) => {
+      const v = snap.val() || {};
+      for (const [uid, ex] of Object.entries(v)) {
+        if (uid === state.user.uid) continue;
+        state.allExtras[uid] = { champion: ex.champion || null, topScorer: ex.topScorer || null };
+      }
+      renderCurrentView();
+    }, () => { state._extrasSub = false; }); // si aun no esta permitido, reintenta luego
+    state.unsubs.push(() => off(er, "value", eh));
+  }
+
+  // Picks ajenos por partido: legibles al cerrar cada partido (su deadline).
+  for (const m of MATCHES) {
+    if (state.subbedMatches.has(m.id)) continue;
+    if (now < dayDeadline(m.date)) continue;
+    state.subbedMatches.add(m.id);
+    const r = ref(db, `picksByMatch/${m.id}`);
+    const h = onValue(r, (snap) => {
+      const v = snap.val() || {};
+      for (const [uid, p] of Object.entries(v)) {
+        if (uid === state.user.uid) continue;
+        if (!state.allPicks[uid]) state.allPicks[uid] = {};
+        if (p && (p.home != null || p.away != null)) state.allPicks[uid][m.id] = { home: p.home ?? null, away: p.away ?? null };
+        else delete state.allPicks[uid][m.id];
+      }
+      renderCurrentView();
+    }, () => { state.subbedMatches.delete(m.id); }); // desfasaje de reloj: reintenta luego
+    state.unsubs.push(() => off(r, "value", h));
+  }
 }
 
 function cleanupSubscriptions() {
   state.unsubs.forEach(u => { try { u(); } catch(e){} });
   state.unsubs = [];
+  if (state.revealTimer) { clearInterval(state.revealTimer); state.revealTimer = null; }
+  state.subbedMatches = null;
+  state._extrasSub = false;
+  state.allPicks = {};
+  state.allExtras = {};
 }
 
 // ===================== VIEW ROUTING =====================
@@ -355,6 +464,14 @@ hideLocked.addEventListener("change", renderPicks);
 
 function renderPicks() {
   const container = $("matchList");
+  // Preservar el input que el usuario esté editando: si justo llega un cambio de
+  // Firebase (otro amigo entra, se guarda un pick, etc.) el re-render NO debe borrar
+  // lo que está tipeando ni quitarle el foco. Guardamos field+valor sin guardar.
+  const active = document.activeElement;
+  let editing = null;
+  if (active && active.classList && active.classList.contains("score-input") && container.contains(active)) {
+    editing = { matchId: active.dataset.matchId, field: active.dataset.field, value: active.value };
+  }
   container.innerHTML = "";
   const filterPhase = phaseFilter.value;
   const hideLockedOn = hideLocked.checked;
@@ -387,6 +504,16 @@ function renderPicks() {
   if (container.children.length === 0) {
     container.innerHTML = `<p class="hint">No hay partidos para mostrar con este filtro.</p>`;
   }
+  // Restaurar foco y el valor que se estaba tipeando antes del re-render.
+  if (editing && editing.matchId) {
+    const sel = container.querySelector(
+      `.score-input[data-match-id="${editing.matchId}"][data-field="${editing.field}"]`
+    );
+    if (sel && !sel.disabled) {
+      sel.value = editing.value;
+      sel.focus();
+    }
+  }
 }
 
 function renderMatchCard(m, dayLocked) {
@@ -418,12 +545,14 @@ function renderMatchCard(m, dayLocked) {
   homeInput.value = pick.home != null ? pick.home : "";
   homeInput.placeholder = hasResult ? result.home : "·";
   homeInput.disabled = locked;
+  homeInput.dataset.matchId = m.id; homeInput.dataset.field = "home";
 
   const awayInput = el("input", "score-input");
   awayInput.type = "number"; awayInput.min = "0"; awayInput.max = "20";
   awayInput.value = pick.away != null ? pick.away : "";
   awayInput.placeholder = hasResult ? result.away : "·";
   awayInput.disabled = locked;
+  awayInput.dataset.matchId = m.id; awayInput.dataset.field = "away";
 
   const vs = el("div", "vs"); vs.textContent = "vs";
 
@@ -475,15 +604,16 @@ async function savePick(matchId, home, away, saveState) {
   try {
     const h = home === "" ? null : Math.max(0, parseInt(home, 10));
     const a = away === "" ? null : Math.max(0, parseInt(away, 10));
+    const val = (h == null && a == null) ? null : { home: h, away: a };
 
-    const matchRef = ref(db, `picks/${state.user.uid}/matches/${matchId}`);
-    if (h == null && a == null) {
-      await set(matchRef, null);
-    } else {
-      await set(matchRef, { home: h, away: a });
-    }
-    await update(ref(db, `picks/${state.user.uid}`), {
-      lastUpdate: serverTimestamp()
+    // Escritura atómica multi-path: el pick privado, su copia "espejo" (que recién
+    // se vuelve legible para los demás al cerrar el partido) y lastUpdate se
+    // escriben juntos. O entran todos o no entra ninguno: así no pueden quedar
+    // desincronizados (p. ej. si se corta la conexión entre dos escrituras).
+    await update(ref(db), {
+      [`picks/${state.user.uid}/matches/${matchId}`]: val,
+      [`picksByMatch/${matchId}/${state.user.uid}`]: val,
+      [`picks/${state.user.uid}/lastUpdate`]: serverTimestamp()
     });
 
     saveState.textContent = "Guardado";
@@ -615,17 +745,19 @@ function renderOthers() {
   for (const date of sortedDates) {
     const dayMatches = byDate[date];
     const locked = isDayLocked(date);
-    const myPicksOfDay = dayMatches.every(m => state.myPicks[m.id]);
-    const canSee = locked || myPicksOfDay;
+    // Los picks ajenos recién se revelan cuando arranca el día (cierre). Antes de eso
+    // ni siquiera están disponibles para leer (lo imponen las reglas de Firebase),
+    // ni para el admin.
+    const canSee = locked;
 
     const dayDiv = el("div", "others-day");
     const h = el("h3");
-    h.textContent = formatDate(date) + (locked ? " · cerrado" : (canSee ? " · ya cargaste tus picks" : ""));
+    h.textContent = formatDate(date) + (locked ? " · cerrado" : "");
     dayDiv.appendChild(h);
 
     if (!canSee) {
       const info = el("div", "locked-info");
-      info.textContent = `Cargá tus pronósticos de los ${dayMatches.length} partidos del día para poder ver los del resto.`;
+      info.textContent = `Los pronósticos del resto se revelan cuando arranca el primer partido del día (${formatTime(dayDeadline(date))}).`;
       dayDiv.appendChild(info);
       container.appendChild(dayDiv);
       any = true;
@@ -647,7 +779,7 @@ function renderOthers() {
         const nameTd = el("td");
         nameTd.innerHTML = `<div class="user-cell">${avatarHtml(u.email, u.photoURL, displayName, 24, true)}<span>${escapeHtml(displayName)}</span></div>`;
         const pickTd = el("td");
-        if (p) pickTd.textContent = `${p.home}-${p.away}`;
+        if (p) pickTd.textContent = `${p.home ?? 0}-${p.away ?? 0}`;
         else { pickTd.textContent = "—"; pickTd.style.color = "var(--muted)"; }
         tr.appendChild(nameTd); tr.appendChild(pickTd);
         tbl.appendChild(tr);
@@ -864,11 +996,14 @@ function renderExtras() {
 
   $("saveExtras").onclick = async () => {
     try {
+      const champion = champSel.value || null;
+      const topScorer = scorerIn.value.trim() || null;
       await update(ref(db, `picks/${state.user.uid}`), {
-        champion: champSel.value || null,
-        topScorer: scorerIn.value.trim() || null,
+        champion, topScorer,
         lastUpdate: serverTimestamp()
       });
+      // Copia "espejo" de los extras (se revela al iniciar el torneo)
+      await update(ref(db, `extras/${state.user.uid}`), { champion, topScorer });
       $("extrasStatus").className = "status ok";
       $("extrasStatus").textContent = "Guardado.";
     } catch (e) {
@@ -876,6 +1011,54 @@ function renderExtras() {
       $("extrasStatus").textContent = "Error: " + e.message;
     }
   };
+
+  renderAllExtras(locked);
+}
+
+// Tabla con el campeon/goleador de todos, visible desde el inicio del torneo
+function renderAllExtras(locked) {
+  const box = $("extrasAll");
+  if (!box) return;
+  if (!locked) {
+    box.innerHTML = `<p class="hint">Cuando arranque el torneo vas a ver acá el campeón y goleador que eligió cada uno.</p>`;
+    return;
+  }
+
+  const rows = approvedUsers()
+    .map(u => {
+      const ex = state.allExtras[u.uid] || {};
+      return { ...u, champion: ex.champion || null, topScorer: ex.topScorer || null };
+    })
+    .sort((a, b) => (a.nickname || a.name || a.email || "").localeCompare(b.nickname || b.name || b.email || ""));
+
+  const champOk = c => state.finals.champion && c === state.finals.champion;
+  const scorerOk = s => state.finals.topScorer && s && normalize(s) === normalize(state.finals.topScorer);
+
+  const body = rows.map(r => {
+    const displayName = r.nickname || r.name || r.email;
+    const avatarSmall = avatarHtml(r.email, r.photoURL, displayName, 32, true);
+    const champ = r.champion
+      ? `${escapeHtml(r.champion)}${champOk(r.champion) ? " <strong>✅ +10</strong>" : ""}`
+      : `<span class="muted">—</span>`;
+    const scorer = r.topScorer
+      ? `${escapeHtml(r.topScorer)}${scorerOk(r.topScorer) ? " <strong>✅ +10</strong>" : ""}`
+      : `<span class="muted">—</span>`;
+    return `<tr>
+      <td><div class="user-cell">${avatarSmall}<span>${escapeHtml(displayName)}</span></div></td>
+      <td>${champ}</td>
+      <td>${scorer}</td>
+    </tr>`;
+  }).join("");
+
+  box.innerHTML = `
+    <h3 style="margin-top:24px">Lo que eligió cada uno</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Jugador</th><th>🏆 Campeón</th><th>⚽ Goleador</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 // ===================== ADMIN =====================
@@ -1104,7 +1287,7 @@ window.tryAvatar = function(img) {
 function avatarUrl(email, googlePhoto, name) {
   // Devuelve la URL inicial (jpeg). El onerror del <img> va probando jpg, png, fallback.
   if (email) {
-    const username = email.split("@")[0];
+    const username = email.split("@")[0].toLowerCase();
     return { initial: `CARAS/${username}.jpeg`, username };
   }
   return { initial: googlePhoto || initialsDataUrl(name), username: null };
@@ -1213,66 +1396,16 @@ function toast(msg, kind) {
 
 setInterval(() => { if (state.user && state.view === "picks") renderPicks(); }, 60000);
 
-// ===================== THESPORTSDB SYNC =====================
-// Usamos TheSportsDB (gratis, sin clave) porque api-football no incluye 2026 en free.
-const TSDB_KEY = "3";       // free key pública
-const TSDB_LEAGUE = 4429;   // FIFA World Cup
-const TSDB_SEASON = "2026";
-
-// Algunas selecciones tienen nombres ligeramente distintos. Mapeo manual.
-const TEAM_ALIASES = {
-  "korea republic": "South Korea",
-  "south korea": "South Korea",
-  "ir iran": "Iran",
-  "iran": "Iran",
-  "czechia": "Czech Republic",
-  "czech republic": "Czech Republic",
-  "côte d'ivoire": "Ivory Coast",
-  "cote d'ivoire": "Ivory Coast",
-  "ivory coast": "Ivory Coast",
-  "usa": "United States",
-  "united states of america": "United States",
-  "united states": "United States",
-  "congo dr": "DR Congo",
-  "dr congo": "DR Congo",
-  "democratic republic of the congo": "DR Congo",
-  "cape verde islands": "Cape Verde",
-  "cape verde": "Cape Verde",
-};
-function normalizeTeam(name) {
-  return (name || "").toString().toLowerCase().trim()
-    .normalize("NFD").replace(/[̀-ͯ]/g, "");
-}
-function aliasTeam(apiName) {
-  const k = normalizeTeam(apiName);
-  return TEAM_ALIASES[k] || apiName;
-}
-
-const isPlaceholder = (s) => /grupo|group|winner|runner|mejor|best|tbd|tba/i.test(s || "");
-
-function phaseFromRound(round, group) {
-  const r = (round || "").toString().toLowerCase();
-  const g = (group || "").toString().toLowerCase();
-  if (g && /^[a-l]$/i.test(g)) return "group";
-  if (r.includes("32") || r.includes("round of 32")) return "round_of_32";
-  if (r.includes("16") || r.includes("round of 16") || r.includes("octav")) return "round_of_16";
-  if (r.includes("quarter") || r.includes("cuart")) return "quarterfinal";
-  if (r.includes("semi")) return "semifinal";
-  if (r.includes("3rd") || r.includes("third") || r.includes("tercer")) return "third_place";
-  if (r.includes("final")) return "final";
-  const n = parseInt(r, 10);
-  if (n >= 125 && n < 200) return "round_of_32";
-  if (n >= 200 && n < 250) return "round_of_16";
-  if (n >= 250 && n < 300) return "quarterfinal";
-  if (n >= 300 && n < 400) return "semifinal";
-  if (n >= 400 && n < 500) return "third_place";
-  if (n >= 500) return "final";
-  return null;
-}
-function hasResult(evt) {
-  return evt.intHomeScore != null && evt.intAwayScore != null
-    && evt.intHomeScore !== "" && evt.intAwayScore !== "";
-}
+// ===================== SYNC (GitHub Actions → football-data.org) =====================
+// El botón ya no llama a una API de fútbol directo (football-data.org no permite
+// CORS desde el navegador). En cambio dispara el workflow de GitHub Actions
+// (sync.yml), que trae los resultados y los escribe en Firebase. Como la web
+// escucha "tournament" en tiempo real, los cambios aparecen solos para todos.
+//
+// Requiere un token de GitHub (fine-grained, solo Actions:write sobre el repo)
+// guardado en Realtime Database en `admin/githubToken` — solo legible por el admin.
+const GH_REPO = "giandb96/prode-mundial-2026";
+const GH_WORKFLOW = "sync.yml";
 
 let syncInProgress = false;
 async function syncFromAPI(manual) {
@@ -1281,110 +1414,49 @@ async function syncFromAPI(manual) {
     return;
   }
   if (syncInProgress) return;
-  const lastSync = +(localStorage.getItem("lastApiSync") || 0);
+  const lastSync = +(localStorage.getItem("lastSyncDispatch") || 0);
   const ageMin = (Date.now() - lastSync) / 60000;
   if (!manual && ageMin < 5) return;
 
   syncInProgress = true;
-  updateSyncStatusUI("Sincronizando…");
+  updateSyncStatusUI("Disparando sync…");
   try {
+    // 1. Leer el token de GitHub desde la DB (solo el admin tiene permiso)
+    const tokenSnap = await get(ref(db, "admin/githubToken"));
+    const token = tokenSnap.val();
+    if (!token) throw new Error("Falta admin/githubToken en la base");
+
+    // 2. Disparar el workflow
     const resp = await fetch(
-      `https://www.thesportsdb.com/api/v1/json/${TSDB_KEY}/eventsseason.php?id=${TSDB_LEAGUE}&s=${TSDB_SEASON}`
+      `https://api.github.com/repos/${GH_REPO}/actions/workflows/${GH_WORKFLOW}/dispatches`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Accept": "application/vnd.github+json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ ref: "main" })
+      }
     );
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const data = await resp.json();
-    const events = data.events || [];
-
-    let updated = 0, skipped = 0, unmatched = [], bracketUpdates = 0;
-
-    // Buckets de knockout por phase+date
-    const knockoutEvents = events
-      .filter(e => {
-        const ph = phaseFromRound(e.intRound, e.strGroup);
-        return ph && ph !== "group";
-      })
-      .sort((a, b) => new Date(`${a.dateEvent}T${a.strTime || "00:00:00"}`) - new Date(`${b.dateEvent}T${b.strTime || "00:00:00"}`));
-    const knockoutByPhaseDate = {};
-    for (const e of knockoutEvents) {
-      const phase = phaseFromRound(e.intRound, e.strGroup);
-      const key = `${phase}|${e.dateEvent}`;
-      if (!knockoutByPhaseDate[key]) knockoutByPhaseDate[key] = [];
-      knockoutByPhaseDate[key].push(e);
+    if (resp.status !== 204) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`GitHub HTTP ${resp.status} ${body.slice(0, 120)}`);
     }
-    // Llaves: equipos reales para knockout
-    for (const key of Object.keys(knockoutByPhaseDate)) {
-      const [phase, date] = key.split("|");
-      const ours = MATCHES.filter(m => m.phase === phase && m.date === date)
-                          .sort((a, b) => a.id.localeCompare(b.id));
-      const theirs = knockoutByPhaseDate[key];
-      const n = Math.min(ours.length, theirs.length);
-      for (let i = 0; i < n; i++) {
-        const myMatch = ours[i];
-        const apiHome = theirs[i].strHomeTeam;
-        const apiAway = theirs[i].strAwayTeam;
-        if (apiHome && apiAway && !isPlaceholder(apiHome) && !isPlaceholder(apiAway)) {
-          const cur = state.teamOverrides[myMatch.id] || {};
-          if (cur.home !== apiHome || cur.away !== apiAway) {
-            await set(ref(db, `tournament/teamOverrides/${myMatch.id}`), {
-              home: apiHome, away: apiAway
-            });
-            bracketUpdates++;
-          }
-        }
-      }
+    localStorage.setItem("lastSyncDispatch", String(Date.now()));
+
+    // 3. Esperar a que el workflow escriba (actualiza tournament/lastApiSync).
+    //    Suele tardar 30-60 seg. Los resultados llegan solos por el listener.
+    const dispatchedAt = Date.now();
+    updateSyncStatusUI("Workflow corriendo… (~30 seg)");
+    const ok = await waitForSyncDone(dispatchedAt, 150000);
+    if (ok) {
+      updateSyncStatusUI();
+      if (manual) toast("Sync OK — resultados actualizados", "ok");
+    } else {
+      updateSyncStatusUI("El workflow no respondió aún (mirá Actions en GitHub)");
+      if (manual) toast("Tardó demasiado — revisá Actions en GitHub", "err");
     }
-
-    // Resultados
-    for (const e of events) {
-      if (!hasResult(e)) continue;
-      const apiDate = e.dateEvent;
-      const apiHome = aliasTeam(e.strHomeTeam);
-      const apiAway = aliasTeam(e.strAwayTeam);
-      const homeScore = parseInt(e.intHomeScore, 10);
-      const awayScore = parseInt(e.intAwayScore, 10);
-
-      let candidate = MATCHES.find(m =>
-        m.date === apiDate &&
-        normalizeTeam(m.homeRaw) === normalizeTeam(apiHome) &&
-        normalizeTeam(m.awayRaw) === normalizeTeam(apiAway)
-      );
-      if (!candidate) {
-        const phase = phaseFromRound(e.intRound, e.strGroup);
-        if (phase && phase !== "group") {
-          const ours = MATCHES.filter(m => m.phase === phase && m.date === apiDate)
-                              .sort((a, b) => a.id.localeCompare(b.id));
-          const theirs = knockoutByPhaseDate[`${phase}|${apiDate}`] || [];
-          const idx = theirs.indexOf(e);
-          if (idx >= 0 && ours[idx]) candidate = ours[idx];
-        }
-      }
-      if (!candidate) {
-        const alts = MATCHES.filter(m =>
-          normalizeTeam(m.homeRaw) === normalizeTeam(apiHome) &&
-          normalizeTeam(m.awayRaw) === normalizeTeam(apiAway)
-        );
-        if (alts.length === 1) candidate = alts[0];
-      }
-      if (!candidate) { unmatched.push(`${apiDate} ${apiHome} vs ${apiAway}`); continue; }
-
-      const existing = state.results[candidate.id];
-      if (existing && existing.home === homeScore && existing.away === awayScore) {
-        skipped++;
-        continue;
-      }
-      await syncOneMatch(candidate.id, homeScore, awayScore);
-      updated++;
-    }
-
-    localStorage.setItem("lastApiSync", String(Date.now()));
-    await update(ref(db, "tournament"), { lastApiSync: Date.now() });
-
-    const summary = `Sync OK. ${updated} resultados, ${bracketUpdates} llaves` +
-      (skipped ? `, ${skipped} sin cambios` : "") +
-      (unmatched.length ? `, ${unmatched.length} no matcheados` : "");
-    updateSyncStatusUI(summary);
-    if (manual) toast(summary, "ok");
-    if (unmatched.length) console.warn("Partidos no matcheados:", unmatched);
   } catch (e) {
     updateSyncStatusUI("Error: " + e.message);
     if (manual) toast("Error: " + e.message, "err");
@@ -1394,8 +1466,17 @@ async function syncFromAPI(manual) {
   }
 }
 
-async function syncOneMatch(matchId, home, away) {
-  await set(ref(db, `tournament/results/${matchId}`), { home, away });
+// Pollea tournament/lastApiSync hasta que sea posterior al dispatch (o timeout)
+async function waitForSyncDone(sinceTs, timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    await new Promise(r => setTimeout(r, 6000));
+    try {
+      const snap = await get(ref(db, "tournament/lastApiSync"));
+      if ((snap.val() || 0) >= sinceTs) return true;
+    } catch { /* reintenta */ }
+  }
+  return false;
 }
 
 function updateSyncStatusUI(msg) {
@@ -1404,7 +1485,7 @@ function updateSyncStatusUI(msg) {
   if (msg) {
     el.textContent = msg;
   } else {
-    const last = +(localStorage.getItem("lastApiSync") || 0);
+    const last = state.lastApiSync || 0;
     if (!last) { el.textContent = "Sin sincronizar aún"; return; }
     const ageMin = Math.round((Date.now() - last) / 60000);
     el.textContent = `Última sync: hace ${ageMin} min`;
@@ -1418,17 +1499,14 @@ function maybeAutoSync() {
 // Refrescar el status cada minuto
 setInterval(() => updateSyncStatusUI(), 60000);
 
-// Background polling: cada 20 min mientras haya una pestaña abierta como admin.
-// Funciona incluso con la pestaña minimizada o en segundo plano (los timers se
-// throttean a 1/min pero 20 min sigue ejecutándose). Throttle interno de 5 min en
-// syncFromAPI evita dobles llamadas. Cuota api-football: 100/día → 72 polls/día
-// con este intervalo, más espacio para syncs manuales y al abrir página.
+// Background polling: cada 20 min mientras haya una pestaña abierta como admin,
+// dispara el workflow de GitHub (complementa el cron, que GitHub suele demorar).
 const BACKGROUND_POLL_MS = 20 * 60 * 1000; // 20 minutos
 setInterval(() => {
   // Forzamos saltar el throttle del syncFromAPI con manual=true ya que el
   // background poll YA es el throttle.
   if (state.user?.isAdmin) {
-    const last = +(localStorage.getItem("lastApiSync") || 0);
+    const last = +(localStorage.getItem("lastSyncDispatch") || 0);
     if (Date.now() - last >= BACKGROUND_POLL_MS - 30000) {
       syncFromAPI(true);
     }

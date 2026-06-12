@@ -12,27 +12,49 @@
       }
     },
     "picks": {
-      ".read": "auth != null && (auth.token.email === 'gian96db@gmail.com' || root.child('users').child(auth.uid).child('approved').val() === true)",
       "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
         ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'",
         "champion": {
-          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true))"
+          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true && (!root.child('deadlines').child('_extras').exists() || now < root.child('deadlines').child('_extras').val())))"
         },
         "topScorer": {
-          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true))"
+          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true && (!root.child('deadlines').child('_extras').exists() || now < root.child('deadlines').child('_extras').val())))"
         },
         "lastUpdate": {
           ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true))"
         },
         "matches": {
           "$matchId": {
-            ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true)) && !root.child('tournament').child('results').child($matchId).exists()"
+            ".write": "auth != null && !root.child('tournament').child('results').child($matchId).exists() && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true && (!root.child('deadlines').child($matchId).exists() || now < root.child('deadlines').child($matchId).val())))"
           }
         }
       }
     },
+    "deadlines": {
+      ".read": "auth != null && (auth.token.email === 'gian96db@gmail.com' || root.child('users').child(auth.uid).child('approved').val() === true)",
+      ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'"
+    },
+    "picksByMatch": {
+      "$matchId": {
+        ".read": "auth != null && root.child('users').child(auth.uid).child('approved').val() === true && root.child('deadlines').child($matchId).exists() && now >= root.child('deadlines').child($matchId).val()",
+        "$uid": {
+          ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true && !root.child('tournament').child('results').child($matchId).exists() && (!root.child('deadlines').child($matchId).exists() || now < root.child('deadlines').child($matchId).val())))"
+        }
+      }
+    },
+    "extras": {
+      ".read": "auth != null && root.child('users').child(auth.uid).child('approved').val() === true && root.child('deadlines').child('_extras').exists() && now >= root.child('deadlines').child('_extras').val()",
+      "$uid": {
+        ".write": "auth != null && (auth.token.email === 'gian96db@gmail.com' || (auth.uid === $uid && root.child('users').child(auth.uid).child('approved').val() === true && (!root.child('deadlines').child('_extras').exists() || now < root.child('deadlines').child('_extras').val())))"
+      }
+    },
     "tournament": {
       ".read": "auth != null && (auth.token.email === 'gian96db@gmail.com' || root.child('users').child(auth.uid).child('approved').val() === true)",
+      ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'"
+    },
+    "admin": {
+      ".read": "auth != null && auth.token.email === 'gian96db@gmail.com'",
       ".write": "auth != null && auth.token.email === 'gian96db@gmail.com'"
     }
   }
