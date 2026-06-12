@@ -1,4 +1,4 @@
-name: Sync prode (api-football → Firebase)
+name: Sync prode (football-data.org → Firebase)
 
 on:
   schedule:
@@ -27,7 +27,7 @@ jobs:
 
       - name: Run sync
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          FOOTBALL_DATA_KEY: ${{ secrets.FOOTBALL_DATA_KEY }}
           FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: node sync.mjs

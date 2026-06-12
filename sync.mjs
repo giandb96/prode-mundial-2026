@@ -1,13 +1,12 @@
 // Script de sincronización standalone para GitHub Actions.
-// Corre cada 20 min, llama a API-Football (api-sports.io) y actualiza
+// Corre cada 20 min, llama a football-data.org y actualiza
 // tournament/results y tournament/teamOverrides en Realtime Database.
 //
-// API-Football free tier: 100 requests/día. Este script usa 1 request por
-// corrida (todos los fixtures del Mundial en una sola llamada), así que con
-// el cron de */20 (72 corridas/día) entra cómodo.
+// football-data.org: el Mundial está en el tier GRATIS (forever).
+// Límite: 10 requests/minuto. Este script usa 1 request por corrida.
 //
 // Variables de entorno requeridas:
-//   API_FOOTBALL_KEY           (key de dashboard.api-football.com)
+//   FOOTBALL_DATA_KEY          (token de football-data.org)
 //   FIREBASE_DATABASE_URL
 //   FIREBASE_SERVICE_ACCOUNT   (el JSON completo del service account)
 
@@ -15,8 +14,7 @@ import { initializeApp, cert } from "firebase-admin/app";
 import { getDatabase } from "firebase-admin/database";
 import { MATCHES } from "./fixture.js";
 
-const LEAGUE_ID = 1;     // FIFA World Cup en API-Football
-const SEASON = "2026";
+const COMPETITION = "WC";   // FIFA World Cup
 
 const TEAM_ALIASES = {
   "korea republic": "south korea",
@@ -42,31 +40,28 @@ function normalizeTeam(s) {
     .replace(/\s+/g, " ").trim();
   return TEAM_ALIASES[t] || t;
 }
-const isPlaceholder = (s) => /grupo|group|winner|runner|mejor|best|tbd|tba|\d[a-l]\b/i.test(s || "");
+const isPlaceholder = (s) => !s || /grupo|group|winner|runner|mejor|best|tbd|tba/i.test(s);
 
-// API-Football usa league.round tipo "Group Stage - 1", "Round of 32",
-// "Quarter-finals", "Semi-finals", "Third-place Play-off", "Final".
-function phaseFromRound(round) {
-  const r = (round || "").toString().toLowerCase();
-  if (r.includes("group")) return "group";
-  if (r.includes("32")) return "round_of_32";
-  if (r.includes("16")) return "round_of_16";
-  if (r.includes("quarter")) return "quarterfinal";
-  if (r.includes("semi")) return "semifinal";
-  if (r.includes("third") || r.includes("3rd")) return "third_place";
-  if (r.includes("final")) return "final";
-  return null;
-}
+// football-data.org v4 usa "stage": GROUP_STAGE, LAST_32, LAST_16,
+// QUARTER_FINALS, SEMI_FINALS, THIRD_PLACE, FINAL.
+const STAGE_TO_PHASE = {
+  GROUP_STAGE: "group",
+  LAST_32: "round_of_32",
+  ROUND_OF_32: "round_of_32",
+  LAST_16: "round_of_16",
+  ROUND_OF_16: "round_of_16",
+  QUARTER_FINALS: "quarterfinal",
+  SEMI_FINALS: "semifinal",
+  THIRD_PLACE: "third_place",
+  FINAL: "final",
+};
 
-// Tiene resultado si los goles no son null (en vivo ya vienen 0-0, FT final).
-// goals incluye tiempo extra pero NO penales (igual que antes con TheSportsDB).
-function hasResult(f) {
-  return f.goals && f.goals.home != null && f.goals.away != null;
-}
+// Estados con score válido (en vivo o terminado)
+const LIVE_OR_DONE = new Set(["IN_PLAY", "PAUSED", "EXTRA_TIME", "PENALTY_SHOOTOUT", "FINISHED"]);
 
 async function main() {
-  if (!process.env.API_FOOTBALL_KEY) {
-    throw new Error("Falta API_FOOTBALL_KEY (secret de GitHub). Crear key en dashboard.api-football.com");
+  if (!process.env.FOOTBALL_DATA_KEY) {
+    throw new Error("Falta FOOTBALL_DATA_KEY (secret de GitHub). Registrarse gratis en football-data.org");
   }
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   const app = initializeApp({
@@ -79,35 +74,44 @@ async function main() {
   const currentResults = (await db.ref("tournament/results").get()).val() || {};
   const currentOverrides = (await db.ref("tournament/teamOverrides").get()).val() || {};
 
-  // 2. Llamar a API-Football (1 sola request: todos los fixtures del torneo, en UTC)
-  const url = `https://v3.football.api-sports.io/fixtures?league=${LEAGUE_ID}&season=${SEASON}&timezone=UTC`;
-  const resp = await fetch(url, { headers: { "x-apisports-key": process.env.API_FOOTBALL_KEY } });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const data = await resp.json();
-  if (data.errors && Object.keys(data.errors).length) {
-    throw new Error(`API-Football error: ${JSON.stringify(data.errors)}`);
+  // 2. Llamar a football-data.org (1 request: todos los partidos del Mundial)
+  const url = `https://api.football-data.org/v4/competitions/${COMPETITION}/matches`;
+  const resp = await fetch(url, { headers: { "X-Auth-Token": process.env.FOOTBALL_DATA_KEY } });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`football-data.org HTTP ${resp.status}: ${body.slice(0, 300)}`);
   }
-  const fixtures = data.response || [];
-  console.log(`API-Football trajo ${fixtures.length} fixtures (requests hoy: ${JSON.stringify(data?.paging || {})})`);
+  const data = await resp.json();
+  const rawMatches = data.matches || [];
+  console.log(`football-data.org trajo ${rawMatches.length} partidos`);
 
-  // Forma común: { date (YYYY-MM-DD UTC), ts, home, away, goals, phase, status }
-  const events = fixtures.map(f => ({
-    date: (f.fixture?.date || "").slice(0, 10),
-    ts: f.fixture?.timestamp || 0,
-    home: f.teams?.home?.name || "",
-    away: f.teams?.away?.name || "",
-    goals: f.goals,
-    phase: phaseFromRound(f.league?.round),
-    status: f.fixture?.status?.short || "",
+  // Forma común
+  const events = rawMatches.map(m => ({
+    date: (m.utcDate || "").slice(0, 10),
+    ts: Date.parse(m.utcDate || 0) || 0,
+    home: m.homeTeam?.name || "",
+    homeShort: m.homeTeam?.shortName || "",
+    away: m.awayTeam?.name || "",
+    awayShort: m.awayTeam?.shortName || "",
+    phase: STAGE_TO_PHASE[m.stage] || null,
+    status: m.status || "",
+    goalsHome: m.score?.fullTime?.home,
+    goalsAway: m.score?.fullTime?.away,
   }));
 
-  // 3. Buckets de knockout (por phase+date, ordenados por hora, igual que antes)
+  const sameTeam = (mine, e, side) => {
+    const raw = normalizeTeam(mine);
+    return raw === normalizeTeam(side === "home" ? e.home : e.away)
+        || raw === normalizeTeam(side === "home" ? e.homeShort : e.awayShort);
+  };
+  const hasResult = (e) => LIVE_OR_DONE.has(e.status) && e.goalsHome != null && e.goalsAway != null;
+
+  // 3. Buckets de knockout (por phase+date, ordenados por hora)
   const knockoutByPhaseDate = {};
   for (const e of events) {
     if (!e.phase || e.phase === "group") continue;
     const key = `${e.phase}|${e.date}`;
-    if (!knockoutByPhaseDate[key]) knockoutByPhaseDate[key] = [];
-    knockoutByPhaseDate[key].push(e);
+    (knockoutByPhaseDate[key] ||= []).push(e);
   }
   for (const key of Object.keys(knockoutByPhaseDate)) {
     knockoutByPhaseDate[key].sort((a, b) => a.ts - b.ts);
@@ -127,7 +131,7 @@ async function main() {
       const myMatch = ours[i];
       const apiHome = theirs[i].home;
       const apiAway = theirs[i].away;
-      if (apiHome && apiAway && !isPlaceholder(apiHome) && !isPlaceholder(apiAway)) {
+      if (!isPlaceholder(apiHome) && !isPlaceholder(apiAway)) {
         const cur = currentOverrides[myMatch.id] || {};
         if (cur.home !== apiHome || cur.away !== apiAway) {
           overrideUpdates[myMatch.id] = { home: apiHome, away: apiAway };
@@ -140,13 +144,11 @@ async function main() {
   let unmatched = 0;
   for (const e of events) {
     if (!hasResult(e)) continue;
-    const homeScore = parseInt(e.goals.home, 10);
-    const awayScore = parseInt(e.goals.away, 10);
+    const homeScore = parseInt(e.goalsHome, 10);
+    const awayScore = parseInt(e.goalsAway, 10);
 
     let candidate = MATCHES.find(m =>
-      m.date === e.date &&
-      normalizeTeam(m.homeRaw) === normalizeTeam(e.home) &&
-      normalizeTeam(m.awayRaw) === normalizeTeam(e.away)
+      m.date === e.date && sameTeam(m.homeRaw, e, "home") && sameTeam(m.awayRaw, e, "away")
     );
     if (!candidate) {
       // Knockout: matchear por posición
@@ -160,10 +162,7 @@ async function main() {
     }
     if (!candidate) {
       // Último recurso: por equipos sin fecha (si el cruce es único)
-      const alts = MATCHES.filter(m =>
-        normalizeTeam(m.homeRaw) === normalizeTeam(e.home) &&
-        normalizeTeam(m.awayRaw) === normalizeTeam(e.away)
-      );
+      const alts = MATCHES.filter(m => sameTeam(m.homeRaw, e, "home") && sameTeam(m.awayRaw, e, "away"));
       if (alts.length === 1) candidate = alts[0];
     }
     if (!candidate) {
