@@ -748,12 +748,15 @@ function renderOthers() {
   const sortedDates = Object.keys(byDate).sort();
 
   const hideFinished = hideFinishedOthers.checked;
+  // "Hoy" en hora argentina (mismo criterio con que se agrupan los partidos)
+  const todayAR = new Date().toLocaleDateString("sv-SE", { timeZone: TZ_AR });
 
   let any = false;
   for (const date of sortedDates) {
     let dayMatches = byDate[date];
     const locked = isDayLocked(date);
-    if (hideFinished && locked) {
+    // Ocultamos jugados solo de días anteriores; el día de hoy se muestra completo.
+    if (hideFinished && locked && date !== todayAR) {
       dayMatches = dayMatches.filter((m) => !state.results[m.id]);
       if (!dayMatches.length) continue; // día entero ya jugado: lo salteamos
     }
@@ -1527,4 +1530,17 @@ setInterval(() => {
 
 // Cuando la pestaña vuelve a estar visible (alguien la enfocó después de un rato),
 // hacé un sync rápido para que la info esté fresca.
-document.addEventListener("visibilitychange", ()
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.user?.isAdmin) {
+    syncFromAPI(false);
+  }
+});
+
+// Aviso si la config no fue editada
+if (FIREBASE_CONFIG.apiKey === "REEMPLAZAR") {
+  document.body.innerHTML = `<div style="padding:40px;text-align:center;color:#e6edf7;font-family:sans-serif;background:#0b1220;min-height:100vh">
+    <h1>⚙️ Falta configurar Firebase</h1>
+    <p>Editá <code>config.js</code> y completá las credenciales antes de usar la web.</p>
+    <p>Mirá <code>README.md</code> para el paso a paso.</p>
+  </div>`;
+}
