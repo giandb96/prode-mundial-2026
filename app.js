@@ -461,6 +461,12 @@ const phaseFilter = $("phaseFilter");
 const hideLocked = $("hideLocked");
 phaseFilter.addEventListener("change", renderPicks);
 hideLocked.addEventListener("change", renderPicks);
+const hideFinishedOthers = $("hideFinishedOthers");
+hideFinishedOthers.checked = localStorage.getItem("hideFinishedOthers") === "1";
+hideFinishedOthers.addEventListener("change", () => {
+  localStorage.setItem("hideFinishedOthers", hideFinishedOthers.checked ? "1" : "0");
+  renderOthers();
+});
 
 function renderPicks() {
   const container = $("matchList");
@@ -741,10 +747,16 @@ function renderOthers() {
   }
   const sortedDates = Object.keys(byDate).sort();
 
+  const hideFinished = hideFinishedOthers.checked;
+
   let any = false;
   for (const date of sortedDates) {
-    const dayMatches = byDate[date];
+    let dayMatches = byDate[date];
     const locked = isDayLocked(date);
+    if (hideFinished && locked) {
+      dayMatches = dayMatches.filter((m) => !state.results[m.id]);
+      if (!dayMatches.length) continue; // día entero ya jugado: lo salteamos
+    }
     // Los picks ajenos recién se revelan cuando arranca el día (cierre). Antes de eso
     // ni siquiera están disponibles para leer (lo imponen las reglas de Firebase),
     // ni para el admin.
@@ -1515,17 +1527,4 @@ setInterval(() => {
 
 // Cuando la pestaña vuelve a estar visible (alguien la enfocó después de un rato),
 // hacé un sync rápido para que la info esté fresca.
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && state.user?.isAdmin) {
-    syncFromAPI(false);
-  }
-});
-
-// Aviso si la config no fue editada
-if (FIREBASE_CONFIG.apiKey === "REEMPLAZAR") {
-  document.body.innerHTML = `<div style="padding:40px;text-align:center;color:#e6edf7;font-family:sans-serif;background:#0b1220;min-height:100vh">
-    <h1>⚙️ Falta configurar Firebase</h1>
-    <p>Editá <code>config.js</code> y completá las credenciales antes de usar la web.</p>
-    <p>Mirá <code>README.md</code> para el paso a paso.</p>
-  </div>`;
-}
+document.addEventListener("visibilitychange", ()
