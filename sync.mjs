@@ -106,37 +106,51 @@ async function main() {
   };
   const hasResult = (e) => LIVE_OR_DONE.has(e.status) && e.goalsHome != null && e.goalsAway != null;
 
-  // 3. Buckets de knockout (por phase+date, ordenados por hora)
-  const knockoutByPhaseDate = {};
-  for (const e of events) {
-    if (!e.phase || e.phase === "group") continue;
-    const key = `${e.phase}|${e.date}`;
-    (knockoutByPhaseDate[key] ||= []).push(e);
-  }
-  for (const key of Object.keys(knockoutByPhaseDate)) {
-    knockoutByPhaseDate[key].sort((a, b) => a.ts - b.ts);
-  }
+  // 3. Matching de knockout por HORARIO de inicio (ts), no por posición/fecha.
+  //    El fixture tiene el datetime real de cada partido y la API también, así que
+  //    emparejamos cada cruce con el partido del fixture cuyo kickoff esté más cerca,
+  //    dentro de la misma fase. Antes se zipeaba la API ordenada por hora contra el
+  //    fixture ordenado por id y agrupado por fecha: eso corría los equipos de fila
+  //    cuando el orden FIFA ≠ orden por horario, o cuando la fecha UTC del partido
+  //    caía en otro día que la fecha del fixture (p.ej. partidos 01:00 UTC).
+  const tsOf = (m) => Date.parse(m.datetime) || 0;
+  const knockoutOurs = MATCHES.filter(m => m.phase && m.phase !== "group");
+  const TS_TOL = 6 * 60 * 60 * 1000; // 6 h de margen ante reprogramaciones menores
+  const findOurKO = (e) => {
+    let best = null, bestDiff = Infinity;
+    for (const m of knockoutOurs) {
+      if (m.phase !== e.phase) continue;
+      const diff = Math.abs(tsOf(m) - e.ts);
+      if (diff < bestDiff) { bestDiff = diff; best = m; }
+    }
+    return bestDiff <= TS_TOL ? best : null;
+  };
 
   const resultUpdates = {};
   const overrideUpdates = {};
 
-  // 4. Mapeo de equipos reales para knockout (cuando ya están definidos los cruces)
-  for (const key of Object.keys(knockoutByPhaseDate)) {
-    const [phase, date] = key.split("|");
-    const ours = MATCHES.filter(m => m.phase === phase && m.date === date)
-                        .sort((a, b) => a.id.localeCompare(b.id));
-    const theirs = knockoutByPhaseDate[key];
-    const n = Math.min(ours.length, theirs.length);
-    for (let i = 0; i < n; i++) {
-      const myMatch = ours[i];
-      const apiHome = theirs[i].home;
-      const apiAway = theirs[i].away;
-      if (!isPlaceholder(apiHome) && !isPlaceholder(apiAway)) {
-        const cur = currentOverrides[myMatch.id] || {};
-        if (cur.home !== apiHome || cur.away !== apiAway) {
-          overrideUpdates[myMatch.id] = { home: apiHome, away: apiAway };
-        }
+  // 4. Mapeo de equipos reales para knockout (cuando ya están definidos los cruces).
+  //    Reconstruimos el override de cada cruce desde la API; si la API todavía no lo
+  //    resolvió, limpiamos cualquier override viejo para no dejar equipos pegados en
+  //    la fila equivocada.
+  const apiByOurId = {};
+  for (const e of events) {
+    if (!e.phase || e.phase === "group") continue;
+    const m = findOurKO(e);
+    if (m) apiByOurId[m.id] = e;
+  }
+  for (const m of knockoutOurs) {
+    const e = apiByOurId[m.id];
+    const cur = currentOverrides[m.id] || null;
+    const desired = (e && !isPlaceholder(e.home) && !isPlaceholder(e.away))
+      ? { home: e.home, away: e.away }
+      : null;
+    if (desired) {
+      if (!cur || cur.home !== desired.home || cur.away !== desired.away) {
+        overrideUpdates[m.id] = desired;
       }
+    } else if (cur) {
+      overrideUpdates[m.id] = null; // borra el override viejo/incorrecto en RTDB
     }
   }
 
@@ -150,15 +164,9 @@ async function main() {
     let candidate = MATCHES.find(m =>
       m.date === e.date && sameTeam(m.homeRaw, e, "home") && sameTeam(m.awayRaw, e, "away")
     );
-    if (!candidate) {
-      // Knockout: matchear por posición
-      if (e.phase && e.phase !== "group") {
-        const ours = MATCHES.filter(m => m.phase === e.phase && m.date === e.date)
-                            .sort((a, b) => a.id.localeCompare(b.id));
-        const theirs = knockoutByPhaseDate[`${e.phase}|${e.date}`] || [];
-        const idx = theirs.indexOf(e);
-        if (idx >= 0 && ours[idx]) candidate = ours[idx];
-      }
+    if (!candidate && e.phase && e.phase !== "group") {
+      // Knockout: matchear por horario de inicio (mismo criterio que el mapeo de cruces)
+      candidate = findOurKO(e);
     }
     if (!candidate) {
       // Último recurso: por equipos sin fecha (si el cruce es único)
