@@ -95,8 +95,15 @@ async function main() {
     awayShort: m.awayTeam?.shortName || "",
     phase: STAGE_TO_PHASE[m.stage] || null,
     status: m.status || "",
-    goalsHome: m.score?.fullTime?.home,
-    goalsAway: m.score?.fullTime?.away,
+    // El prode cuenta el resultado de los 120 minutos (incluye alargue, NO penales).
+    // OJO: en football-data.org v4 `fullTime` es un marcador ACUMULADO: cuando hay
+    // tanda de penales le SUMA los penales (ej. 1-1 + 6-5 pens => fullTime 7-6).
+    // El resultado de los 120' = fullTime − penalties. En partidos sin penales,
+    // `penalties` es null y queda fullTime tal cual (incluye los goles del alargue).
+    goalsHome: m.score?.fullTime?.home == null ? undefined
+      : m.score.fullTime.home - (m.score?.penalties?.home ?? 0),
+    goalsAway: m.score?.fullTime?.away == null ? undefined
+      : m.score.fullTime.away - (m.score?.penalties?.away ?? 0),
   }));
 
   const sameTeam = (mine, e, side) => {
